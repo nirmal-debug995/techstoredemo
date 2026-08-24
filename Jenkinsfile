@@ -11,23 +11,38 @@ pipeline {
     }
 
     environment {
-        APP_ROOT        = '/home/jenkins/apps/fusion'
-        FRONTEND_DIR    = '/home/jenkins/apps/fusion/frontend'
-        BACKEND_DIR     = '/home/jenkins/apps/fusion/backend'
-        ENV_FILE        = '/etc/fusion/backend.env'
+        APP_NAME = 'fusion'
 
-        BACKEND_PORT    = '8000'
-        BACKEND_NAME    = 'fusion-backend'
+        WORKSPACE_DIR =
+            '/home/jenkins/workspace/Fusion-GitHub-Checkout-Test'
 
-        NODE_ENV        = 'production'
+        DEPLOY_ROOT =
+            '/home/jenkins/apps/fusion'
+
+        FRONTEND_DEPLOY_DIR =
+            '/home/jenkins/apps/fusion/frontend'
+
+        BACKEND_DEPLOY_DIR =
+            '/home/jenkins/apps/fusion/backend'
+
+        ENV_FILE =
+            '/etc/fusion/backend.env'
+
+        BACKEND_PORT = '8000'
+
+        NODE_ENV = 'development'
     }
 
     stages {
 
+        // ============================================================
+        // VERIFY WORKER
+        // ============================================================
+
         stage('Verify Worker') {
             steps {
                 sh '''
-                    set -e
+                    set -eu
 
                     echo "======================================"
                     echo "           VERIFY WORKER"
@@ -36,10 +51,10 @@ pipeline {
                     echo "===== Worker ====="
                     whoami
                     hostname
-                    hostname -I
+                    hostname -I || true
 
                     echo "===== Public IP ====="
-                    curl -4 -s ifconfig.me || true
+                    curl -4 -s --max-time 10 ifconfig.me || true
                     echo
 
                     echo "===== Node ====="
@@ -55,7 +70,12 @@ pipeline {
                     sudo -n /usr/sbin/nginx -t
 
                     echo "===== Environment File ====="
-                    test -r "$ENV_FILE"
+
+                    if [ ! -r "${ENV_FILE}" ]; then
+                        echo "ERROR: ${ENV_FILE} is not readable by Jenkins."
+                        exit 1
+                    fi
+
                     echo "Environment file is readable by Jenkins."
 
                     echo "Worker verification successful."
@@ -63,8 +83,16 @@ pipeline {
             }
         }
 
+
+        // ============================================================
+        // CHECKOUT
+        // ============================================================
+
         stage('Checkout dev') {
             steps {
+
+                deleteDir()
+
                 git(
                     branch: 'dev',
                     credentialsId: 'github-ssh-key',
@@ -73,10 +101,15 @@ pipeline {
             }
         }
 
+
+        // ============================================================
+        // VERIFY CHECKOUT
+        // ============================================================
+
         stage('Verify Checkout') {
             steps {
                 sh '''
-                    set -e
+                    set -eu
 
                     echo "======================================"
                     echo "          VERIFY CHECKOUT"
@@ -95,33 +128,38 @@ pipeline {
                     git status --short
 
                     echo "===== Root package.json ====="
-                    node -e "
-                        const p = require('./package.json');
 
-                        console.log('name:', p.name);
-                        console.log('version:', p.version);
-                        console.log('build:', p.scripts && p.scripts.build);
-                        console.log(
-                            '@craco/craco:',
-                            p.devDependencies &&
-                            p.devDependencies['@craco/craco']
-                        );
-                    "
+                    node <<'NODE'
+                    const p = require('./package.json');
+
+                    console.log('name:', p.name);
+                    console.log('version:', p.version);
+                    console.log('build:', p.scripts && p.scripts.build);
+
+                    console.log(
+                        '@craco/craco:',
+                        p.devDependencies &&
+                        p.devDependencies['@craco/craco']
+                    );
+                    NODE
 
                     echo "===== Backend package.json ====="
-                    node -e "
-                        const p = require('./backend/package.json');
 
-                        console.log('name:', p.name);
-                        console.log('version:', p.version);
-                    "
+                    node <<'NODE'
+                    const p = require('./backend/package.json');
+
+                    console.log('name:', p.name);
+                    console.log('version:', p.version);
+                    NODE
 
                     echo "===== Required files ====="
 
                     test -f package.json
                     test -f package-lock.json
+
                     test -f backend/package.json
                     test -f backend/package-lock.json
+
                     test -f craco.config.js
 
                     echo "Repository verification successful."
@@ -129,10 +167,15 @@ pipeline {
             }
         }
 
+
+        // ============================================================
+        // INSTALL DEPENDENCIES
+        // ============================================================
+
         stage('Install Dependencies') {
             steps {
                 sh '''
-                    set -e
+                    set -eu
 
                     echo "======================================"
                     echo "        INSTALL DEPENDENCIES"
@@ -142,73 +185,89 @@ pipeline {
                     node -v
                     npm -v
 
-                    echo "===== Current npm configuration ====="
-                    echo "npm omit:"
-                    npm config get omit || true
-
-                    echo "npm production:"
-                    npm config get production || true
-
-                    echo "NODE_ENV:"
-                    echo "${NODE_ENV}"
-
                     echo "======================================"
-                    echo " Removing dev-dependency omission"
+                    echo "  RESETTING NPM CONFIGURATION"
                     echo "======================================"
 
-                    # Jenkins/worker may have omit=dev configured globally.
-                    # The frontend build requires @craco/craco from devDependencies.
-                    npm config delete omit || true
-                    npm config delete production || true
+                    unset NPM_CONFIG_OMIT || true
+                    unset npm_config_omit || true
 
-                    # Explicitly force dev dependencies for this build.
-                    export NPM_CONFIG_PRODUCTION=false
-                    export npm_config_production=false
-                    export NPM_CONFIG_OMIT=
+                    unset NPM_CONFIG_PRODUCTION || true
+                    unset npm_config_production || true
 
-                    echo "===== npm configuration after override ====="
-                    echo "npm omit:"
+                    unset NPM_CONFIG_ONLY || true
+                    unset npm_config_only || true
+
+                    unset NPM_CONFIG_NODE_ENV || true
+                    unset npm_config_node_env || true
+
+                    export NODE_ENV=development
+
+                    echo "NODE_ENV=${NODE_ENV}"
+
+                    echo "===== npm effective configuration ====="
+
                     npm config get omit || true
-
-                    echo "npm production:"
                     npm config get production || true
 
                     echo "======================================"
                     echo " Installing frontend dependencies"
                     echo "======================================"
 
-                    npm ci --include=dev --omit=
+                    npm ci --include=dev
 
                     echo "======================================"
                     echo " Verifying CRACO"
                     echo "======================================"
 
-                    test -x ./node_modules/.bin/craco
+                    if [ ! -x ./node_modules/.bin/craco ]; then
+
+                        echo "ERROR: CRACO executable is missing."
+
+                        echo
+                        echo "===== @craco directory ====="
+
+                        ls -lah node_modules/@craco 2>/dev/null || true
+
+                        echo
+                        echo "===== npm dependency tree ====="
+
+                        npm ls @craco/craco --depth=0 || true
+
+                        echo
+                        echo "===== npm configuration ====="
+
+                        npm config get omit || true
+                        npm config get production || true
+
+                        exit 1
+                    fi
 
                     echo "CRACO executable exists."
 
                     echo "===== CRACO package ====="
 
-                    node -e "
-                        const fs = require('fs');
+                    node <<'NODE'
+                    const fs = require('fs');
 
-                        const pkgPath =
-                            './node_modules/@craco/craco/package.json';
+                    const pkgPath =
+                        './node_modules/@craco/craco/package.json';
 
-                        if (!fs.existsSync(pkgPath)) {
-                            console.error(
-                                'ERROR: @craco/craco/package.json not found'
-                            );
-                            process.exit(1);
-                        }
-
-                        const pkg = require(pkgPath);
-
-                        console.log(
-                            'CRACO version:',
-                            pkg.version
+                    if (!fs.existsSync(pkgPath)) {
+                        console.error(
+                            'ERROR: @craco/craco/package.json not found'
                         );
-                    "
+
+                        process.exit(1);
+                    }
+
+                    const pkg = require(pkgPath);
+
+                    console.log(
+                        'CRACO version:',
+                        pkg.version
+                    );
+                    NODE
 
                     echo "===== npm ls @craco/craco ====="
 
@@ -220,139 +279,163 @@ pipeline {
 
                     cd backend
 
-                    npm ci --include=dev --omit=
+                    npm ci --include=dev
 
                     echo "======================================"
                     echo " Verifying Mongoose"
                     echo "======================================"
 
-                    node -e "
-                        console.log(
-                            'Mongoose version:',
-                            require('mongoose').version
-                        );
-                    "
+                    node <<'NODE'
+                    console.log(
+                        'Mongoose version:',
+                        require('mongoose').version
+                    );
+                    NODE
 
                     echo "Dependency installation completed."
                 '''
             }
         }
 
+
+        // ============================================================
+        // TEST MONGODB
+        // ============================================================
+
         stage('Test MongoDB Connection') {
             steps {
                 sh '''
-                    set -e
+                    set -eu
 
                     echo "======================================"
-                    echo "      TEST MONGODB CONNECTION"
+                    echo "       TEST MONGODB CONNECTION"
                     echo "======================================"
 
                     echo "===== Environment file ====="
 
-                    test -r "$ENV_FILE"
+                    if [ ! -r "${ENV_FILE}" ]; then
+                        echo "ERROR: ${ENV_FILE} is not readable."
+                        exit 1
+                    fi
 
                     echo "Environment file is readable."
 
                     echo "===== Loading backend environment ====="
 
                     set -a
-                    . "$ENV_FILE"
+                    . "${ENV_FILE}"
                     set +a
 
-                    if [ -z "$MONGO_URI" ]; then
-                        echo "ERROR: MONGO_URI is not set."
+                    if [ -z "${MONGO_URI:-}" ]; then
+                        echo "ERROR: MONGO_URI is missing."
                         exit 1
                     fi
 
-                    if [ -z "$JWT_SECRET" ]; then
-                        echo "ERROR: JWT_SECRET is not set."
+                    if [ -z "${JWT_SECRET:-}" ]; then
+                        echo "ERROR: JWT_SECRET is missing."
                         exit 1
                     fi
 
-                    if [ -z "$PORT" ]; then
-                        echo "ERROR: PORT is not set."
+                    if [ -z "${PORT:-}" ]; then
+                        echo "ERROR: PORT is missing."
                         exit 1
                     fi
 
                     echo "Required environment variables loaded."
 
-                    cd "$WORKSPACE/backend"
+                    cd "${WORKSPACE_DIR}/backend"
 
                     echo "===== Testing MongoDB connection ====="
 
                     node <<'NODE'
-const mongoose = require('mongoose');
+                    const mongoose = require('mongoose');
 
-mongoose.connect(
-    process.env.MONGO_URI,
-    {
-        serverSelectionTimeoutMS: 15000
-    }
-)
-.then(async () => {
-    console.log('MongoDB CONNECTED');
+                    async function main() {
 
-    await mongoose.connection.close();
+                        try {
 
-    console.log('MongoDB connection closed.');
+                            await mongoose.connect(
+                                process.env.MONGO_URI,
+                                {
+                                    serverSelectionTimeoutMS: 10000
+                                }
+                            );
 
-    process.exit(0);
-})
-.catch((error) => {
-    console.error(
-        'MongoDB FAILED:',
-        error.message
-    );
+                            console.log('MongoDB CONNECTED');
 
-    process.exit(1);
-});
-NODE
+                            await mongoose.connection.close();
+
+                            console.log(
+                                'MongoDB connection closed.'
+                            );
+
+                        } catch (error) {
+
+                            console.error(
+                                'MongoDB connection FAILED'
+                            );
+
+                            console.error(
+                                error.message
+                            );
+
+                            process.exit(1);
+                        }
+                    }
+
+                    main();
+                    NODE
 
                     echo "MongoDB connection test successful."
                 '''
             }
         }
 
+
+        // ============================================================
+        // BUILD FRONTEND
+        // ============================================================
+
         stage('Build Frontend') {
             steps {
                 sh '''
-                    set -e
+                    set -eu
 
                     echo "======================================"
                     echo "          BUILD FRONTEND"
                     echo "======================================"
 
-                    # Build requires devDependencies such as CRACO.
+                    cd "${WORKSPACE_DIR}"
+
+                    unset NPM_CONFIG_OMIT || true
+                    unset npm_config_omit || true
+
+                    unset NPM_CONFIG_PRODUCTION || true
+                    unset npm_config_production || true
+
+                    unset NPM_CONFIG_ONLY || true
+                    unset npm_config_only || true
+
                     export NODE_ENV=development
-                    export NPM_CONFIG_PRODUCTION=false
-                    export npm_config_production=false
-                    export NPM_CONFIG_OMIT=
 
-                    echo "NODE_ENV=$NODE_ENV"
-
-                    echo "===== npm configuration ====="
-                    echo "npm omit:"
-                    npm config get omit || true
-
-                    echo "npm production:"
-                    npm config get production || true
+                    echo "NODE_ENV=${NODE_ENV}"
 
                     echo "===== CRACO executable ====="
 
                     if [ ! -x ./node_modules/.bin/craco ]; then
+
                         echo "ERROR: CRACO executable is missing."
+
                         echo
-                        echo "Checking node_modules:"
-                        ls -lah node_modules/.bin 2>/dev/null || true
-                        echo
-                        echo "Checking @craco:"
-                        ls -lah node_modules/@craco 2>/dev/null || true
-                        echo
-                        echo "Checking npm dependency tree:"
+                        echo "===== npm ls @craco/craco ====="
+
                         npm ls @craco/craco --depth=0 || true
 
                         echo
-                        echo "This means npm omitted the devDependencies."
+                        echo "===== node_modules/@craco ====="
+
+                        ls -lah node_modules/@craco 2>/dev/null || true
+
                         exit 1
                     fi
 
@@ -362,356 +445,512 @@ NODE
 
                     ./node_modules/.bin/craco --version || true
 
-                    echo "===== Running frontend build ====="
+                    echo "===== Starting frontend build ====="
 
                     npm run build
 
-                    echo "===== Build verification ====="
+                    echo "===== Verifying build directory ====="
 
-                    test -d build
-                    test -f build/index.html
+                    if [ ! -d build ]; then
+                        echo "ERROR: build directory was not created."
+                        exit 1
+                    fi
 
-                    echo "Frontend build completed successfully."
+                    if [ ! -f build/index.html ]; then
+                        echo "ERROR: build/index.html does not exist."
+                        exit 1
+                    fi
 
-                    echo "===== Build directory ====="
+                    echo "Frontend build successful."
+
+                    echo "===== Build size ====="
+
                     du -sh build
-                    ls -lah build | head -30
                 '''
             }
         }
 
+
+        // ============================================================
+        // PREPARE DEPLOYMENT
+        // ============================================================
+
         stage('Prepare Deployment') {
             steps {
                 sh '''
-                    set -e
+                    set -eu
 
                     echo "======================================"
                     echo "        PREPARE DEPLOYMENT"
                     echo "======================================"
 
-                    echo "Creating deployment directories."
-
-                    mkdir -p "$APP_ROOT"
-                    mkdir -p "$FRONTEND_DIR"
-                    mkdir -p "$BACKEND_DIR"
+                    mkdir -p "${DEPLOY_ROOT}"
+                    mkdir -p "${FRONTEND_DEPLOY_DIR}"
+                    mkdir -p "${BACKEND_DEPLOY_DIR}"
 
                     echo "Deployment directories ready."
 
-                    echo "===== Current deployment directories ====="
-
-                    ls -lah "$APP_ROOT" || true
-                    ls -lah "$FRONTEND_DIR" || true
-                    ls -lah "$BACKEND_DIR" || true
+                    ls -ld \
+                        "${DEPLOY_ROOT}" \
+                        "${FRONTEND_DEPLOY_DIR}" \
+                        "${BACKEND_DEPLOY_DIR}"
                 '''
             }
         }
+
+
+        // ============================================================
+        // INSTALL PRODUCTION BACKEND DEPENDENCIES
+        // ============================================================
 
         stage('Install Production Dependencies') {
             steps {
                 sh '''
-                    set -e
+                    set -eu
 
                     echo "======================================"
-                    echo " INSTALL PRODUCTION DEPENDENCIES"
+                    echo "   INSTALL PRODUCTION DEPENDENCIES"
                     echo "======================================"
 
-                    cd "$WORKSPACE/backend"
+                    rm -rf "${BACKEND_DEPLOY_DIR}"
 
-                    echo "Installing backend production dependencies."
+                    mkdir -p "${BACKEND_DEPLOY_DIR}"
+
+                    cp -a \
+                        "${WORKSPACE_DIR}/backend/." \
+                        "${BACKEND_DEPLOY_DIR}/"
+
+                    cd "${BACKEND_DEPLOY_DIR}"
+
+                    unset NPM_CONFIG_OMIT || true
+                    unset npm_config_omit || true
+
+                    unset NPM_CONFIG_PRODUCTION || true
+                    unset npm_config_production || true
 
                     npm ci --omit=dev
 
-                    echo "Backend production dependencies installed."
+                    echo "Production backend dependencies installed."
 
-                    echo "===== Backend node_modules ====="
+                    if [ ! -d node_modules ]; then
+                        echo "ERROR: backend node_modules missing."
+                        exit 1
+                    fi
 
-                    du -sh node_modules
+                    echo "Backend deployment directory ready."
                 '''
             }
         }
 
+
+        // ============================================================
+        // VERIFY DEPLOYMENT ENVIRONMENT
+        // ============================================================
+
         stage('Verify Deployment Environment') {
             steps {
                 sh '''
-                    set -e
+                    set -eu
 
                     echo "======================================"
-                    echo "   VERIFY DEPLOYMENT ENVIRONMENT"
+                    echo "     VERIFY DEPLOYMENT ENVIRONMENT"
                     echo "======================================"
 
-                    echo "===== Environment ====="
+                    echo "===== Node ====="
+                    node -v
 
-                    test -r "$ENV_FILE"
-                    echo "Backend environment file exists."
-
-                    echo "===== Deployment directories ====="
-
-                    test -d "$APP_ROOT"
-                    test -d "$FRONTEND_DIR"
-                    test -d "$BACKEND_DIR"
-
-                    echo "Deployment directories exist."
-
-                    echo "===== Backend entry point ====="
-
-                    test -f "$WORKSPACE/backend/index.js"
-
-                    echo "Backend index.js exists."
+                    echo "===== NPM ====="
+                    npm -v
 
                     echo "===== PM2 ====="
-
                     pm2 --version
 
                     echo "===== Nginx ====="
-
                     sudo -n /usr/sbin/nginx -t
+
+                    echo "===== Deployment directories ====="
+
+                    test -d "${DEPLOY_ROOT}"
+                    test -d "${FRONTEND_DEPLOY_DIR}"
+                    test -d "${BACKEND_DEPLOY_DIR}"
 
                     echo "Deployment environment verification successful."
                 '''
             }
         }
 
+
+        // ============================================================
+        // DEPLOY BACKEND
+        // ============================================================
+
         stage('Deploy Backend') {
             steps {
                 sh '''
-                    set -e
+                    set -eu
 
                     echo "======================================"
-                    echo "          DEPLOY BACKEND"
+                    echo "           DEPLOY BACKEND"
                     echo "======================================"
 
-                    echo "Copying backend files."
+                    cd "${BACKEND_DEPLOY_DIR}"
 
-                    rsync -a \
-                        --delete \
-                        --exclude=node_modules \
-                        "$WORKSPACE/backend/" \
-                        "$BACKEND_DIR/"
+                    echo "===== Backend files ====="
 
-                    echo "Backend files copied."
+                    test -f package.json
 
-                    echo "Copying production node_modules."
-
-                    rsync -a \
-                        --delete \
-                        "$WORKSPACE/backend/node_modules/" \
-                        "$BACKEND_DIR/node_modules/"
-
-                    echo "Backend node_modules copied."
-
-                    echo "Checking backend entry point."
-
-                    test -f "$BACKEND_DIR/index.js"
-
-                    echo "Starting/restarting PM2 application."
-
-                    if pm2 describe "$BACKEND_NAME" >/dev/null 2>&1; then
-
-                        echo "Existing PM2 process found."
-
-                        pm2 restart "$BACKEND_NAME" \
-                            --update-env
-
+                    if [ -f server.js ]; then
+                        ENTRY_FILE="server.js"
+                    elif [ -f index.js ]; then
+                        ENTRY_FILE="index.js"
+                    elif [ -f app.js ]; then
+                        ENTRY_FILE="app.js"
                     else
-
-                        echo "PM2 process does not exist."
-
-                        if [ -f "$WORKSPACE/ecosystem.config.js" ]; then
-
-                            echo "Using repository ecosystem.config.js."
-
-                            pm2 start "$WORKSPACE/ecosystem.config.js" \
-                                --only "$BACKEND_NAME"
-
-                        else
-
-                            echo "ecosystem.config.js not found."
-                            echo "Starting backend directly."
-
-                            pm2 start "$BACKEND_DIR/index.js" \
-                                --name "$BACKEND_NAME" \
-                                --cwd "$BACKEND_DIR" \
-                                --update-env
-
-                        fi
+                        echo "ERROR: Could not find backend entry file."
+                        exit 1
                     fi
 
-                    echo "Backend deployment completed."
+                    echo "Backend entry point: ${ENTRY_FILE}"
 
-                    echo "===== PM2 status ====="
+                    echo "Backend files verified."
 
-                    pm2 status
-                '''
-            }
-        }
+                    echo "===== Loading backend environment ====="
 
-        stage('Deploy Frontend') {
-            steps {
-                sh '''
-                    set -e
+                    set -a
+                    . "${ENV_FILE}"
+                    set +a
 
-                    echo "======================================"
-                    echo "         DEPLOY FRONTEND"
-                    echo "======================================"
+                    echo "===== Stopping existing backend ====="
 
-                    test -d "$WORKSPACE/build"
-                    test -f "$WORKSPACE/build/index.html"
+                    pm2 delete "${APP_NAME}-backend" 2>/dev/null || true
 
-                    echo "Copying frontend build."
+                    echo "===== Starting backend with PM2 ====="
 
-                    rsync -a \
-                        --delete \
-                        "$WORKSPACE/build/" \
-                        "$FRONTEND_DIR/"
+                    pm2 start "${ENTRY_FILE}" \
+                        --name "${APP_NAME}-backend" \
+                        --cwd "${BACKEND_DEPLOY_DIR}" \
+                        --time
 
-                    echo "Frontend deployment completed."
-
-                    echo "===== Frontend directory ====="
-
-                    ls -lah "$FRONTEND_DIR"
-
-                    echo "===== index.html ====="
-
-                    test -f "$FRONTEND_DIR/index.html"
-                '''
-            }
-        }
-
-        stage('Configure Nginx') {
-            steps {
-                sh '''
-                    set -e
-
-                    echo "======================================"
-                    echo "           CONFIGURE NGINX"
-                    echo "======================================"
-
-                    echo "Testing Nginx configuration."
-
-                    sudo -n /usr/sbin/nginx -t
-
-                    echo "Reloading Nginx."
-
-                    sudo -n /usr/sbin/nginx -s reload
-
-                    echo "Nginx reload completed."
-
-                    sudo -n /usr/sbin/nginx -t
-                '''
-            }
-        }
-
-        stage('Save PM2 Process') {
-            steps {
-                sh '''
-                    set -e
-
-                    echo "======================================"
-                    echo "          SAVE PM2 PROCESS"
-                    echo "======================================"
-
-                    echo "===== PM2 status ====="
+                    echo "===== PM2 status after start ====="
 
                     pm2 status
+
+                    echo "===== PM2 describe ====="
+
+                    pm2 describe "${APP_NAME}-backend" || true
 
                     echo "===== Saving PM2 process list ====="
 
                     pm2 save
 
-                    echo "PM2 process list saved."
-
-                    echo "===== PM2 status after save ====="
-
-                    pm2 status
+                    echo "Backend deployment successful."
                 '''
             }
         }
 
+
+        // ============================================================
+        // DEPLOY FRONTEND
+        // ============================================================
+
+        stage('Deploy Frontend') {
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "======================================"
+                    echo "          DEPLOY FRONTEND"
+                    echo "======================================"
+
+                    cd "${WORKSPACE_DIR}"
+
+                    if [ ! -d build ]; then
+                        echo "ERROR: Frontend build directory does not exist."
+                        exit 1
+                    fi
+
+                    if [ ! -f build/index.html ]; then
+                        echo "ERROR: build/index.html does not exist."
+                        exit 1
+                    fi
+
+                    echo "===== Cleaning previous frontend ====="
+
+                    rm -rf "${FRONTEND_DEPLOY_DIR}"
+
+                    mkdir -p "${FRONTEND_DEPLOY_DIR}"
+
+                    echo "===== Copying frontend ====="
+
+                    cp -a build/. "${FRONTEND_DEPLOY_DIR}/"
+
+                    echo "===== Verifying frontend ====="
+
+                    test -f "${FRONTEND_DEPLOY_DIR}/index.html"
+
+                    echo "Frontend deployment successful."
+
+                    echo "===== Frontend files ====="
+
+                    ls -lah "${FRONTEND_DEPLOY_DIR}"
+                '''
+            }
+        }
+
+
+        // ============================================================
+        // CONFIGURE NGINX
+        // ============================================================
+
+        stage('Configure Nginx') {
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "======================================"
+                    echo "           CONFIGURE NGINX"
+                    echo "======================================"
+
+                    echo "===== Testing Nginx configuration ====="
+
+                    sudo -n /usr/sbin/nginx -t
+
+                    echo "===== Reloading Nginx ====="
+
+                    sudo -n /usr/bin/systemctl reload nginx
+
+                    echo "Nginx configuration successful."
+                '''
+            }
+        }
+
+
+        // ============================================================
+        // SAVE PM2 PROCESS
+        // ============================================================
+
+        stage('Save PM2 Process') {
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "======================================"
+                    echo "          SAVE PM2 PROCESS"
+                    echo "======================================"
+
+                    pm2 save
+
+                    echo "===== PM2 status ====="
+
+                    pm2 status
+
+                    echo "PM2 process saved successfully."
+                '''
+            }
+        }
+
+
+        // ============================================================
+        // HEALTH CHECK
+        // ============================================================
+
         stage('Health Check') {
             steps {
                 sh '''
-                    set -e
+                    set -eu
 
                     echo "======================================"
                     echo "            HEALTH CHECK"
                     echo "======================================"
 
-                    echo "===== PM2 ====="
+                    echo "===== PM2 status ====="
 
                     pm2 status
 
-                    if ! pm2 describe "$BACKEND_NAME" >/dev/null 2>&1; then
-                        echo "ERROR: $BACKEND_NAME is not registered with PM2."
+                    echo
+                    echo "===== Backend process ====="
+
+                    if ! pm2 describe "${APP_NAME}-backend" >/dev/null 2>&1; then
+
+                        echo "ERROR: ${APP_NAME}-backend is not registered in PM2."
+
+                        echo
+                        echo "===== PM2 process list ====="
+
+                        pm2 status || true
+
                         exit 1
                     fi
 
-                    echo "Backend PM2 process exists."
+                    echo
+                    echo "===== PM2 describe ====="
 
-                    echo "===== Backend port ====="
+                    pm2 describe "${APP_NAME}-backend"
 
-                    sleep 3
+                    echo
+                    echo "Waiting for backend process to initialize..."
 
-                    if curl -fsS \
+                    sleep 5
+
+                    echo
+                    echo "===== Backend PM2 status ====="
+
+                    STATUS=$(
+                        pm2 describe "${APP_NAME}-backend" 2>/dev/null \
+                        | grep -E 'status' \
+                        | head -1 \
+                        || true
+                    )
+
+                    echo "Backend PM2 status: ${STATUS}"
+
+                    echo
+                    echo "===== Verifying backend is ONLINE ====="
+
+                    if ! pm2 describe "${APP_NAME}-backend" 2>/dev/null \
+                        | grep -q "online"
+                    then
+
+                        echo "ERROR: Backend is not online."
+
+                        echo
+                        echo "===== PM2 status ====="
+
+                        pm2 status || true
+
+                        echo
+                        echo "===== PM2 describe ====="
+
+                        pm2 describe "${APP_NAME}-backend" || true
+
+                        echo
+                        echo "===== PM2 logs ====="
+
+                        pm2 logs "${APP_NAME}-backend" \
+                            --lines 50 \
+                            --nostream || true
+
+                        exit 1
+                    fi
+
+                    echo "Backend PM2 process is ONLINE."
+
+                    echo
+                    echo "===== Checking backend port ====="
+
+                    if curl \
+                        --fail \
+                        --silent \
+                        --show-error \
                         --max-time 10 \
-                        "http://127.0.0.1:${BACKEND_PORT}" \
-                        >/tmp/fusion-backend-health.txt 2>&1; then
+                        "http://127.0.0.1:${BACKEND_PORT}/" \
+                        >/tmp/fusion-backend-health.txt 2>&1
+                    then
 
-                        echo "Backend responded on port ${BACKEND_PORT}."
+                        echo "Backend HTTP check successful."
+
+                        echo
+                        echo "===== Backend response ====="
 
                         cat /tmp/fusion-backend-health.txt || true
 
                     else
 
-                        echo "WARNING: Backend root URL did not return HTTP success."
-                        echo "Checking PM2 logs."
+                        echo "WARNING: Backend root endpoint did not return HTTP 2xx."
 
-                        pm2 logs "$BACKEND_NAME" \
+                        echo
+                        echo "===== Backend response ====="
+
+                        cat /tmp/fusion-backend-health.txt || true
+
+                        echo
+                        echo "===== PM2 logs ====="
+
+                        pm2 logs "${APP_NAME}-backend" \
                             --lines 50 \
                             --nostream || true
 
-                        # Do not fail solely because the application root
-                        # endpoint may not be defined.
-                        echo "Continuing health verification."
+                        /*
+                         * Do NOT immediately fail here.
+                         *
+                         * Some applications do not expose "/" as an
+                         * HTTP health endpoint.
+                         *
+                         * PM2 ONLINE is the primary process check.
+                         */
                     fi
 
+                    echo
+                    echo "===== Final backend PM2 verification ====="
+
+                    if ! pm2 describe "${APP_NAME}-backend" 2>/dev/null \
+                        | grep -q "online"
+                    then
+
+                        echo "ERROR: Backend stopped after health check."
+
+                        echo
+                        echo "===== PM2 logs ====="
+
+                        pm2 logs "${APP_NAME}-backend" \
+                            --lines 50 \
+                            --nostream || true
+
+                        exit 1
+                    fi
+
+                    echo "Backend remains ONLINE."
+
+                    echo
+                    echo "===== Frontend ====="
+
+                    test -f "${FRONTEND_DEPLOY_DIR}/index.html"
+
+                    echo "Frontend health check successful."
+
+                    echo
                     echo "===== Nginx ====="
 
                     sudo -n /usr/sbin/nginx -t
 
-                    echo "Nginx configuration is valid."
-
-                    echo "===== Frontend ====="
-
-                    test -f "$FRONTEND_DIR/index.html"
-
-                    echo "Frontend index.html exists."
-
+                    echo
                     echo "======================================"
-                    echo "       HEALTH CHECK COMPLETED"
+                    echo "       HEALTH CHECK SUCCESSFUL"
                     echo "======================================"
                 '''
             }
         }
     }
 
+
+    // ================================================================
+    // POST ACTIONS
+    // ================================================================
+
     post {
 
         success {
+
             echo '''
 ======================================
-        DEPLOYMENT SUCCESSFUL
+       DEPLOYMENT SUCCESSFUL
 ======================================
-Frontend, backend, PM2 and Nginx deployment completed.
 '''
         }
 
+
         failure {
+
             echo '''
 ======================================
-         DEPLOYMENT FAILED
+        DEPLOYMENT FAILED
 ======================================
 Collecting diagnostics...
 '''
+
+            /*
+             * Diagnostics happen BEFORE cleanWs().
+             */
 
             sh '''
                 set +e
@@ -720,53 +959,114 @@ Collecting diagnostics...
                 echo "             DIAGNOSTICS"
                 echo "======================================"
 
+                echo "===== Current directory ====="
+                pwd
+
                 echo "===== Git ====="
-                git log -1 --oneline || true
+
+                if [ -d .git ]; then
+
+                    git log -1 --oneline
+
+                    git status --short
+
+                else
+
+                    echo "Git metadata is not available."
+
+                fi
 
                 echo "===== PM2 ====="
-                pm2 status || true
 
+                pm2 status
+
+                echo
+                echo "===== Backend PM2 describe ====="
+
+                pm2 describe "${APP_NAME}-backend" || true
+
+                echo
                 echo "===== PM2 logs ====="
-                pm2 logs "$BACKEND_NAME" \
+
+                pm2 logs "${APP_NAME}-backend" \
                     --lines 50 \
                     --nostream || true
 
+                echo
                 echo "===== Nginx ====="
-                sudo -n /usr/sbin/nginx -t || true
 
+                sudo -n /usr/sbin/nginx -t
+
+                echo
                 echo "===== Deployment directories ====="
 
-                ls -lah "$APP_ROOT" || true
-                ls -lah "$FRONTEND_DIR" || true
-                ls -lah "$BACKEND_DIR" || true
+                ls -lah "${DEPLOY_ROOT}" || true
 
+                ls -lah "${FRONTEND_DEPLOY_DIR}" || true
+
+                ls -lah "${BACKEND_DEPLOY_DIR}" || true
+
+                echo
                 echo "===== Frontend build ====="
 
-                if [ -d "$WORKSPACE/build" ]; then
-                    ls -lah "$WORKSPACE/build" || true
+                if [ -d "${WORKSPACE_DIR}/build" ]; then
+
+                    ls -lah "${WORKSPACE_DIR}/build"
+
                 else
+
                     echo "Frontend build directory does not exist."
+
                 fi
 
+                echo
                 echo "===== CRACO diagnostic ====="
 
-                if [ -x "$WORKSPACE/node_modules/.bin/craco" ]; then
+                if [ -x "${WORKSPACE_DIR}/node_modules/.bin/craco" ]; then
+
                     echo "CRACO executable exists."
+
+                    "${WORKSPACE_DIR}/node_modules/.bin/craco" \
+                        --version || true
+
                 else
-                    echo "CRACO executable DOES NOT exist."
+
+                    echo "CRACO executable does not exist."
+
                 fi
 
-                npm ls @craco/craco --depth=0 || true
+                if [ -d "${WORKSPACE_DIR}" ]; then
 
+                    cd "${WORKSPACE_DIR}"
+
+                    npm ls @craco/craco --depth=0 || true
+
+                fi
+
+                echo
+                echo "===== NPM configuration ====="
+
+                npm config get omit || true
+
+                npm config get production || true
+
+                echo
                 echo "======================================"
-                echo "       END OF DIAGNOSTICS"
+                echo "        END OF DIAGNOSTICS"
                 echo "======================================"
             '''
         }
 
+
         always {
+
             echo "Cleaning Jenkins workspace."
-            cleanWs()
+
+            cleanWs(
+                deleteDirs: true,
+                disableDeferredWipeout: true,
+                notFailBuild: true
+            )
         }
     }
 }
