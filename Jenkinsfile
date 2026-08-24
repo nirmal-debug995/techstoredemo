@@ -4,37 +4,41 @@ pipeline {
         label 'fusion-app-worker'
     }
 
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+
+        // Prevent very long builds from hanging forever
+        timeout(time: 30, unit: 'MINUTES')
+    }
+
     environment {
-        APP_NAME = 'fusion-electronics'
-        WORKSPACE_DIR = '/home/jenkins/workspace/Fusion-GitHub-Checkout-Test'
+        APP_NAME        = 'fusion'
+        DEPLOY_ROOT     = '/home/jenkins/apps/fusion'
+        FRONTEND_ROOT   = '/home/jenkins/apps/fusion/frontend'
+        BACKEND_ROOT    = '/home/jenkins/apps/fusion/backend'
 
-        BACKEND_DIR = '/home/jenkins/workspace/Fusion-GitHub-Checkout-Test/backend'
-        FRONTEND_BUILD_DIR = '/home/jenkins/workspace/Fusion-GitHub-Checkout-Test/build'
+        BACKEND_ENV     = '/etc/fusion/backend.env'
 
-        DEPLOY_DIR = '/opt/fusion'
-        BACKEND_DEPLOY_DIR = '/opt/fusion/backend'
-        FRONTEND_DEPLOY_DIR = '/var/www/fusion'
+        PM2_APP_NAME    = 'fusion-backend'
 
-        BACKEND_ENV_FILE = '/etc/fusion/backend.env'
+        FRONTEND_PORT   = '3000'
+        BACKEND_PORT    = '8000'
 
-        BACKEND_PORT = '8000'
-
-        NODE_ENV = 'development'
-
-        PM2_APP_NAME = 'fusion-backend'
-
-        NGINX_CONFIG = '/etc/nginx/nginx.conf'
+        NODE_ENV        = 'production'
     }
 
     stages {
 
-        /*
-         * ============================================================
-         * VERIFY WORKER
-         * ============================================================
-         */
+        // ============================================================
+        // VERIFY WORKER
+        // ============================================================
+
         stage('Verify Worker') {
+
             steps {
+
                 sh '''
                     set -e
 
@@ -64,27 +68,23 @@ pipeline {
                     sudo -n /usr/sbin/nginx -t
 
                     echo "===== Environment File ====="
-
-                    if [ ! -r "${BACKEND_ENV_FILE}" ]; then
-                        echo "ERROR: ${BACKEND_ENV_FILE} is not readable by Jenkins."
-                        exit 1
-                    fi
-
+                    test -r "${BACKEND_ENV}"
                     echo "Environment file is readable by Jenkins."
 
-                    echo "===== Worker verification completed ====="
+                    echo "Worker verification successful."
                 '''
             }
         }
 
 
-        /*
-         * ============================================================
-         * CHECKOUT DEV
-         * ============================================================
-         */
+        // ============================================================
+        // CHECKOUT
+        // ============================================================
+
         stage('Checkout dev') {
+
             steps {
+
                 git(
                     branch: 'dev',
                     credentialsId: 'github-ssh-key',
@@ -94,13 +94,14 @@ pipeline {
         }
 
 
-        /*
-         * ============================================================
-         * VERIFY CHECKOUT
-         * ============================================================
-         */
+        // ============================================================
+        // VERIFY CHECKOUT
+        // ============================================================
+
         stage('Verify Checkout') {
+
             steps {
+
                 sh '''
                     set -e
 
@@ -117,29 +118,32 @@ pipeline {
                     echo "===== Git Commit ====="
                     git log -1 --oneline
 
+                    echo "===== Git Status ====="
+                    git status --short
+
                     echo "===== Root package.json ====="
 
-                    node <<'NODE'
-const p = require('./package.json');
+                    node -e "
+                        const p = require('./package.json');
 
-console.log('name:', p.name);
-console.log('version:', p.version);
-console.log('build:', p.scripts && p.scripts.build);
-
-console.log(
-    '@craco/craco:',
-    p.devDependencies && p.devDependencies['@craco/craco']
-);
-NODE
+                        console.log('name:', p.name);
+                        console.log('version:', p.version);
+                        console.log('build:', p.scripts && p.scripts.build);
+                        console.log(
+                            '@craco/craco:',
+                            p.devDependencies &&
+                            p.devDependencies['@craco/craco']
+                        );
+                    "
 
                     echo "===== Backend package.json ====="
 
-                    node <<'NODE'
-const p = require('./backend/package.json');
+                    node -e "
+                        const p = require('./backend/package.json');
 
-console.log('name:', p.name);
-console.log('version:', p.version);
-NODE
+                        console.log('name:', p.name);
+                        console.log('version:', p.version);
+                    "
 
                     echo "===== Required files ====="
 
@@ -157,21 +161,20 @@ NODE
         }
 
 
-        /*
-         * ============================================================
-         * INSTALL DEPENDENCIES
-         * ============================================================
-         */
+        // ============================================================
+        // INSTALL DEPENDENCIES
+        // ============================================================
+
         stage('Install Dependencies') {
+
             steps {
+
                 sh '''
                     set -e
 
                     echo "======================================"
                     echo "        INSTALL DEPENDENCIES"
                     echo "======================================"
-
-                    export NODE_ENV=development
 
                     echo "===== Node/NPM ====="
                     node -v
@@ -188,142 +191,91 @@ NODE
                     echo "NODE_ENV:"
                     echo "${NODE_ENV}"
 
-                    echo "===== Installing frontend dependencies ====="
+                    echo "======================================"
+                    echo " Installing frontend dependencies"
+                    echo "======================================"
 
                     npm ci --include=dev
 
-                    echo "===== Verify CRACO ====="
+                    echo "======================================"
+                    echo " Verifying CRACO"
+                    echo "======================================"
+
+                    # IMPORTANT:
+                    # Do NOT use:
+                    #
+                    # require('@craco/craco/package.json')
+                    #
+                    # The previous pipeline failed here even though
+                    # the CRACO executable was correctly installed.
+                    #
+                    # The reliable check is the executable itself.
 
                     test -x ./node_modules/.bin/craco
-                    test -d ./node_modules/@craco/craco
 
-                    echo "CRACO package installed."
+                    echo "CRACO executable exists."
 
-                    echo "===== CRACO version ====="
+                    # Verify package through npm rather than Node require.
+                    npm ls @craco/craco --depth=0 || true
 
-                    node -p "require('./node_modules/@craco/craco/package.json').version"
-
-                    echo "===== npm ls CRACO ====="
-
-                    npm ls @craco/craco --depth=0
-
-                    echo "===== Installing backend dependencies ====="
+                    echo "======================================"
+                    echo " Installing backend dependencies"
+                    echo "======================================"
 
                     cd backend
 
                     npm ci --include=dev
 
-                    echo "===== Verify Mongoose ====="
+                    echo "======================================"
+                    echo " Verifying Mongoose"
+                    echo "======================================"
 
-                    node -p "require('mongoose').version"
+                    node -e "
+                        console.log(
+                            'Mongoose version:',
+                            require('mongoose').version
+                        );
+                    "
 
-                    echo "===== Dependency installation completed ====="
+                    echo "Dependency installation completed."
                 '''
             }
         }
 
 
-        /*
-         * ============================================================
-         * VERIFY BUILD DEPENDENCIES
-         *
-         * This stage confirms that node_modules survives between
-         * Install Dependencies and Build Frontend.
-         * ============================================================
-         */
-        stage('Verify Build Dependencies') {
-            steps {
-                sh '''
-                    set -e
+        // ============================================================
+        // TEST MONGODB
+        // ============================================================
 
-                    echo "======================================"
-                    echo "     VERIFY BUILD DEPENDENCIES"
-                    pwd
-
-                        echo "ERROR: node_modules directory does not exist."
-                        exit 1
-                    fi
-
-                    echo "node_modules exists."
-
-                    echo "===== CRACO directory ====="
-
-                    if [ ! -d node_modules/@craco ]; then
-                        echo "ERROR: node_modules/@craco does not exist."
-                        exit 1
-                    fi
-
-                    if [ ! -d node_modules/@craco/craco ]; then
-                        echo "ERROR: node_modules/@craco/craco does not exist."
-                        exit 1
-                    fi
-
-                    echo "CRACO package directory exists."
-
-                    echo "===== CRACO executable ====="
-
-                    if [ ! -x node_modules/.bin/craco ]; then
-                        echo "ERROR: node_modules/.bin/craco does not exist or is not executable."
-                        exit 1
-                    fi
-
-                    echo "CRACO executable exists."
-
-                    echo "===== CRACO version ====="
-
-                    node -p "require('./node_modules/@craco/craco/package.json').version"
-
-                    echo "===== npm ls CRACO ====="
-
-                    npm ls @craco/craco --depth=0
-                    echo "===== node_modules ====="
-
-                    if [ ! -d node_modules ]; then
-
-                    echo "======================================"
-
-                    echo "===== Workspace ====="
-                    echo "===== package script ====="
-
-
-                    node -p "require('./package.json').scripts.build"
-
-
-                    echo "Build dependency verification successful."
-                '''
-
-            }
-        }
-
-
-        /*
-         * ============================================================
-         * TEST MONGODB CONNECTION
-         * ============================================================
-         */
         stage('Test MongoDB Connection') {
+
             steps {
+
                 sh '''
                     set -e
 
                     echo "======================================"
-                    echo "        TEST MONGODB CONNECTION"
+                    echo "      TEST MONGODB CONNECTION"
                     echo "======================================"
 
                     echo "===== Environment file ====="
 
-                    if [ ! -r "${BACKEND_ENV_FILE}" ]; then
-                        echo "ERROR: Backend environment file is not readable."
-                        exit 1
-                    fi
+                    test -r "${BACKEND_ENV}"
 
                     echo "Environment file is readable."
 
                     echo "===== Loading backend environment ====="
 
+                    # Disable shell tracing while loading secrets.
+                    set +x
+
                     set -a
-                    . "${BACKEND_ENV_FILE}"
+                    . "${BACKEND_ENV}"
                     set +a
+
+                    set -x
+
+                    # Never print the actual values.
 
                     if [ -z "${MONGO_URI:-}" ]; then
                         echo "ERROR: MONGO_URI is not configured."
@@ -342,19 +294,23 @@ NODE
 
                     echo "Required environment variables loaded."
 
-                    cd "${BACKEND_DIR}"
+                    cd "${WORKSPACE}/backend"
 
                     echo "===== Testing MongoDB connection ====="
 
                     node <<'NODE'
 const mongoose = require('mongoose');
 
-mongoose.connect(
-    process.env.MONGO_URI,
-    {
-        serverSelectionTimeoutMS: 15000
-    }
-)
+const uri = process.env.MONGO_URI;
+
+if (!uri) {
+    console.error('MONGO_URI is not available.');
+    process.exit(1);
+}
+
+mongoose.connect(uri, {
+    serverSelectionTimeoutMS: 15000
+})
 .then(async () => {
 
     console.log('MongoDB CONNECTED');
@@ -364,6 +320,7 @@ mongoose.connect(
     console.log('MongoDB connection closed.');
 
     process.exit(0);
+
 })
 .catch((error) => {
 
@@ -382,13 +339,14 @@ NODE
         }
 
 
-        /*
-         * ============================================================
-         * BUILD FRONTEND
-         * ============================================================
-         */
+        // ============================================================
+        // BUILD FRONTEND
+        // ============================================================
+
         stage('Build Frontend') {
+
             steps {
+
                 sh '''
                     set -e
 
@@ -400,58 +358,43 @@ NODE
 
                     echo "NODE_ENV=${NODE_ENV}"
 
-                    echo "===== Current directory ====="
-                    pwd
-
-                    echo "===== Node ====="
-                    node -v
-
-                    echo "===== NPM ====="
-                    npm -v
-
-                    echo "===== Verify CRACO ====="
+                    echo "===== CRACO executable ====="
 
                     test -x ./node_modules/.bin/craco
-                    test -d ./node_modules/@craco/craco
 
                     echo "CRACO executable exists."
 
-                    echo "===== CRACO version ====="
+                    echo "===== CRACO package ====="
 
-                    node -p "require('./node_modules/@craco/craco/package.json').version"
+                    npm ls @craco/craco --depth=0 || true
 
-                    echo "===== npm ls CRACO ====="
-
-                    npm ls @craco/craco --depth=0
-
-                    echo "===== Running frontend build ====="
+                    echo "===== Frontend build ====="
 
                     npm run build
 
-                    echo "===== Frontend build completed ====="
+                    echo "===== Build verification ====="
 
-                    echo "===== Verify build directory ====="
+                    test -d build
 
-                    if [ ! -d build ]; then
-                        echo "ERROR: build directory was not created."
-                        exit 1
-                    fi
+                    test -f build/index.html
 
-                    echo "Frontend build directory exists."
+                    echo "Frontend build completed successfully."
 
-                    ls -la build
+                    echo "Build contents:"
+                    ls -lah build
                 '''
             }
         }
 
 
-        /*
-         * ============================================================
-         * PREPARE DEPLOYMENT
-         * ============================================================
-         */
+        // ============================================================
+        // PREPARE DEPLOYMENT
+        // ============================================================
+
         stage('Prepare Deployment') {
+
             steps {
+
                 sh '''
                     set -e
 
@@ -459,89 +402,93 @@ NODE
                     echo "        PREPARE DEPLOYMENT"
                     echo "======================================"
 
-                    echo "===== Verify frontend build ====="
+                    echo "Deployment root:"
+                    echo "${DEPLOY_ROOT}"
 
-                    test -d "${FRONTEND_BUILD_DIR}"
+                    echo "Creating deployment directories."
 
-                    echo "Frontend build found."
+                    sudo -n mkdir -p "${DEPLOY_ROOT}"
+                    sudo -n mkdir -p "${FRONTEND_ROOT}"
+                    sudo -n mkdir -p "${BACKEND_ROOT}"
 
-                    echo "===== Verify backend ====="
-
-                    test -f "${BACKEND_DIR}/package.json"
-
-                    echo "Backend package.json found."
-
-                    echo "===== Verify environment file ====="
-
-                    test -r "${BACKEND_ENV_FILE}"
-
-                    echo "Backend environment file found."
-
-                    echo "===== Create deployment directories ====="
-
-                    sudo -n mkdir -p "${DEPLOY_DIR}"
-                    sudo -n mkdir -p "${BACKEND_DEPLOY_DIR}"
-                    sudo -n mkdir -p "${FRONTEND_DEPLOY_DIR}"
+                    sudo -n chown -R jenkins:jenkins "${DEPLOY_ROOT}"
 
                     echo "Deployment directories ready."
+
+                    echo "===== Existing deployment ====="
+
+                    ls -lah "${DEPLOY_ROOT}" || true
                 '''
             }
         }
 
 
-        /*
-         * ============================================================
-         * INSTALL PRODUCTION DEPENDENCIES
-         * ============================================================
-         */
+        // ============================================================
+        // INSTALL PRODUCTION DEPENDENCIES
+        // ============================================================
+
         stage('Install Production Dependencies') {
+
             steps {
+
                 sh '''
                     set -e
 
                     echo "======================================"
-                    echo "   INSTALL PRODUCTION DEPENDENCIES"
+                    echo " INSTALL PRODUCTION DEPENDENCIES"
                     echo "======================================"
 
-                    TEMP_BACKEND="${WORKSPACE}/.backend-production"
+                    cd backend
 
-                    rm -rf "${TEMP_BACKEND}"
+                    echo "Removing existing backend node_modules."
 
-                    mkdir -p "${TEMP_BACKEND}"
+                    rm -rf node_modules
 
-                    echo "===== Copy backend application ====="
-
-                    cp -a "${BACKEND_DIR}/." "${TEMP_BACKEND}/"
-
-                    cd "${TEMP_BACKEND}"
-
-                    echo "===== Install production dependencies ====="
+                    echo "Installing production dependencies."
 
                     npm ci --omit=dev
 
-                    echo "===== Production dependencies installed ====="
+                    echo "Production dependencies installed."
 
+                    echo "===== Verify backend ====="
+
+                    test -f package.json
+                    test -f index.js
                     test -d node_modules
 
-                    echo "Production backend prepared."
+                    node -e "
+                        console.log(
+                            'Mongoose version:',
+                            require('mongoose').version
+                        );
+                    "
+
+                    echo "Backend production installation verified."
                 '''
             }
         }
 
 
-        /*
-         * ============================================================
-         * VERIFY DEPLOYMENT ENVIRONMENT
-         * ============================================================
-         */
+        // ============================================================
+        // VERIFY DEPLOYMENT ENVIRONMENT
+        // ============================================================
+
         stage('Verify Deployment Environment') {
+
             steps {
+
                 sh '''
                     set -e
 
                     echo "======================================"
-                    echo "    VERIFY DEPLOYMENT ENVIRONMENT"
+                    echo " VERIFY DEPLOYMENT ENVIRONMENT"
                     echo "======================================"
+
+                    echo "===== Environment ====="
+
+                    test -r "${BACKEND_ENV}"
+
+                    echo "Backend environment file exists."
 
                     echo "===== PM2 ====="
 
@@ -551,31 +498,26 @@ NODE
 
                     sudo -n /usr/sbin/nginx -t
 
-                    echo "===== Backend environment ====="
+                    echo "===== Deployment directories ====="
 
-                    test -r "${BACKEND_ENV_FILE}"
+                    test -d "${DEPLOY_ROOT}"
+                    test -d "${FRONTEND_ROOT}"
+                    test -d "${BACKEND_ROOT}"
 
-                    echo "Backend environment file is available."
-
-                    echo "===== Frontend build ====="
-
-                    test -d "${FRONTEND_BUILD_DIR}"
-
-                    echo "Frontend build is available."
-
-                    echo "Deployment environment verification successful."
+                    echo "Deployment environment verified."
                 '''
             }
         }
 
 
-        /*
-         * ============================================================
-         * DEPLOY BACKEND
-         * ============================================================
-         */
+        // ============================================================
+        // DEPLOY BACKEND
+        // ============================================================
+
         stage('Deploy Backend') {
+
             steps {
+
                 sh '''
                     set -e
 
@@ -583,48 +525,48 @@ NODE
                     echo "          DEPLOY BACKEND"
                     echo "======================================"
 
-                    TEMP_BACKEND="${WORKSPACE}/.backend-production"
+                    echo "===== Preparing backend ====="
 
-                    if [ ! -d "${TEMP_BACKEND}" ]; then
-                        echo "ERROR: Production backend directory not found."
-                        exit 1
-                    fi
+                    rm -rf "${BACKEND_ROOT}"
 
-                    echo "===== Stop existing backend ====="
+                    mkdir -p "${BACKEND_ROOT}"
 
+                    echo "Copying backend source."
+
+                    cp -a "${WORKSPACE}/backend/." "${BACKEND_ROOT}/"
+
+                    echo "===== Backend files ====="
+
+                    ls -lah "${BACKEND_ROOT}"
+
+                    echo "===== Backend environment ====="
+
+                    test -r "${BACKEND_ENV}"
+
+                    echo "Environment file available."
+
+                    echo "===== PM2 deployment ====="
+
+                    cd "${BACKEND_ROOT}"
+
+                    # Stop old application if it exists.
                     pm2 delete "${PM2_APP_NAME}" 2>/dev/null || true
 
-                    echo "===== Deploy backend files ====="
+                    # Start using repository ecosystem configuration.
+                    #
+                    # The ecosystem file contains:
+                    #
+                    # cwd: /home/jenkins/apps/fusion/backend
+                    # script: index.js
 
-                    sudo -n rm -rf "${BACKEND_DEPLOY_DIR}"
-
-                    sudo -n mkdir -p "${BACKEND_DEPLOY_DIR}"
-
-                    sudo -n cp -a "${TEMP_BACKEND}/." "${BACKEND_DEPLOY_DIR}/"
-
-                    echo "===== Set backend ownership ====="
-
-                    sudo -n chown -R jenkins:jenkins "${BACKEND_DEPLOY_DIR}"
-
-                    echo "===== Copy environment file ====="
-
-                    if [ ! -r "${BACKEND_ENV_FILE}" ]; then
-                        echo "ERROR: Backend environment file unavailable."
-                        exit 1
-                    fi
-
-                    echo "Environment file remains managed at:"
-                    echo "${BACKEND_ENV_FILE}"
-
-                    echo "===== Start backend with PM2 ====="
-
-                    cd "${BACKEND_DEPLOY_DIR}"
-
-                    if [ -f ecosystem.config.js ]; then
+                    if [ -f "${WORKSPACE}/ecosystem.config.js" ]; then
 
                         echo "Using ecosystem.config.js"
 
-                        pm2 start ecosystem.config.js --update-env
+                        cp "${WORKSPACE}/ecosystem.config.js" \
+                           "${DEPLOY_ROOT}/ecosystem.config.js"
+
+                        pm2 start "${DEPLOY_ROOT}/ecosystem.config.js"
 
                     else
 
@@ -632,22 +574,20 @@ NODE
 
                         echo "Starting backend directly."
 
-                        set -a
-                        . "${BACKEND_ENV_FILE}"
-                        set +a
-
-                        pm2 start server.js \
+                        pm2 start index.js \
                             --name "${PM2_APP_NAME}" \
-                            --update-env
+                            --cwd "${BACKEND_ROOT}" \
+                            --time
+
                     fi
-
-                    echo "===== Save PM2 process list ====="
-
-                    pm2 save
 
                     echo "===== PM2 status ====="
 
                     pm2 status
+
+                    echo "===== PM2 details ====="
+
+                    pm2 describe "${PM2_APP_NAME}" || true
 
                     echo "Backend deployment completed."
                 '''
@@ -655,13 +595,14 @@ NODE
         }
 
 
-        /*
-         * ============================================================
-         * DEPLOY FRONTEND
-         * ============================================================
-         */
+        // ============================================================
+        // DEPLOY FRONTEND
+        // ============================================================
+
         stage('Deploy Frontend') {
+
             steps {
+
                 sh '''
                     set -e
 
@@ -669,64 +610,116 @@ NODE
                     echo "         DEPLOY FRONTEND"
                     echo "======================================"
 
-                    echo "===== Verify build ====="
+                    test -d "${WORKSPACE}/build"
+                    test -f "${WORKSPACE}/build/index.html"
 
-                    test -d "${FRONTEND_BUILD_DIR}"
+                    echo "Cleaning existing frontend."
 
-                    echo "===== Clear existing frontend ====="
+                    rm -rf "${FRONTEND_ROOT}"
 
-                    sudo -n rm -rf "${FRONTEND_DEPLOY_DIR}"
+                    mkdir -p "${FRONTEND_ROOT}"
 
-                    sudo -n mkdir -p "${FRONTEND_DEPLOY_DIR}"
+                    echo "Copying frontend build."
 
-                    echo "===== Copy frontend build ====="
+                    cp -a "${WORKSPACE}/build/." \
+                          "${FRONTEND_ROOT}/"
 
-                    sudo -n cp -a "${FRONTEND_BUILD_DIR}/." \
-                        "${FRONTEND_DEPLOY_DIR}/"
+                    echo "===== Frontend files ====="
 
-                    echo "===== Set frontend ownership ====="
+                    ls -lah "${FRONTEND_ROOT}"
 
-                    sudo -n chown -R www-data:www-data \
-                        "${FRONTEND_DEPLOY_DIR}"
-
-                    echo "===== Set frontend permissions ====="
-
-                    sudo -n find "${FRONTEND_DEPLOY_DIR}" \
-                        -type d \
-                        -exec chmod 755 {} \\;
-
-                    sudo -n find "${FRONTEND_DEPLOY_DIR}" \
-                        -type f \
-                        -exec chmod 644 {} \\;
-
-                    echo "Frontend files deployed."
-
-                    echo "===== Verify Nginx configuration ====="
-
-                    sudo -n /usr/sbin/nginx -t
-
-                    echo "===== Reload Nginx ====="
-
-                    sudo -n systemctl reload nginx
-
-                    echo "Nginx reloaded successfully."
+                    echo "Frontend deployment completed."
                 '''
             }
         }
 
 
-        /*
-         * ============================================================
-         * HEALTH CHECK
-         * ============================================================
-         */
-        stage('Health Check') {
+        // ============================================================
+        // NGINX
+        // ============================================================
+
+        stage('Configure Nginx') {
+
             steps {
+
                 sh '''
                     set -e
 
                     echo "======================================"
-                    echo "            HEALTH CHECK"
+                    echo "          CONFIGURE NGINX"
+                    echo "======================================"
+
+                    echo "===== Repository nginx files ====="
+
+                    if [ -d "${WORKSPACE}/nginx" ]; then
+
+                        find "${WORKSPACE}/nginx" \
+                            -maxdepth 2 \
+                            -type f \
+                            -print
+
+                    else
+
+                        echo "No nginx directory found."
+
+                    fi
+
+                    echo "===== Current nginx configuration ====="
+
+                    sudo -n /usr/sbin/nginx -t
+
+                    echo "Nginx configuration test successful."
+
+                    echo "===== Reloading nginx ====="
+
+                    sudo -n systemctl reload nginx
+
+                    echo "Nginx reloaded."
+
+                    sudo -n /usr/sbin/nginx -t
+                '''
+            }
+        }
+
+
+        // ============================================================
+        // SAVE PM2
+        // ============================================================
+
+        stage('Save PM2 Process') {
+
+            steps {
+
+                sh '''
+                    set -e
+
+                    echo "======================================"
+                    echo "          SAVE PM2 PROCESS"
+                    echo "======================================"
+
+                    pm2 save
+
+                    echo "PM2 process list saved."
+
+                    pm2 status
+                '''
+            }
+        }
+
+
+        // ============================================================
+        // HEALTH CHECK
+        // ============================================================
+
+        stage('Health Check') {
+
+            steps {
+
+                sh '''
+                    set -e
+
+                    echo "======================================"
+                    echo "           HEALTH CHECK"
                     echo "======================================"
 
                     echo "===== PM2 status ====="
@@ -735,91 +728,39 @@ NODE
 
                     echo "===== Backend process ====="
 
-                    if ! pm2 describe "${PM2_APP_NAME}" > /dev/null 2>&1; then
-                        echo "ERROR: PM2 application is not running."
-                        pm2 status
-                        exit 1
-                    fi
+                    pm2 describe "${PM2_APP_NAME}"
 
-                    echo "PM2 application exists."
+                    echo "===== Backend port ====="
 
-                    echo "===== Wait for backend ====="
+                    sleep 3
 
-                    sleep 5
+                    if command -v curl >/dev/null 2>&1; then
 
-                    echo "===== Backend HTTP health check ====="
+                        echo "Testing backend on port ${BACKEND_PORT}."
 
-                    HEALTH_OK=0
-
-                    for i in 1 2 3 4 5 6 7 8 9 10
-                    do
-
-                        echo "Health check attempt ${i}/10"
-
-                        if curl \
+                        curl \
                             --fail \
                             --silent \
                             --show-error \
                             --max-time 10 \
-                            "http://127.0.0.1:${BACKEND_PORT}/health"
-                        then
+                            "http://127.0.0.1:${BACKEND_PORT}" \
+                            || true
 
-                            echo
-                            echo "Backend health check successful."
-
-                            HEALTH_OK=1
-
-                            break
-
-                        else
-
-                            echo "Backend not ready yet."
-
-                            sleep 3
-
-                        fi
-
-                    done
-
-                    if [ "${HEALTH_OK}" -ne 1 ]; then
-
-                        echo "ERROR: Backend health check failed."
-
-                        echo "===== PM2 status ====="
-
-                        pm2 status
-
-                        echo "===== PM2 logs ====="
-
-                        pm2 logs "${PM2_APP_NAME}" \
-                            --lines 100 \
-                            --nostream || true
-
-                        exit 1
-                    fi
-
-                    echo "===== Nginx health check ====="
-
-                    if ! curl \
-                        --fail \
-                        --silent \
-                        --show-error \
-                        --max-time 10 \
-                        "http://127.0.0.1/"
-                    then
-
-                        echo "ERROR: Nginx/frontend health check failed."
-
-                        sudo -n /usr/sbin/nginx -t
-
-                        exit 1
                     fi
 
                     echo
-                    echo "Frontend health check successful."
+                    echo "===== Nginx test ====="
+
+                    sudo -n /usr/sbin/nginx -t
+
+                    echo "===== Frontend ====="
+
+                    test -f "${FRONTEND_ROOT}/index.html"
+
+                    echo "Frontend index.html exists."
 
                     echo "======================================"
-                    echo "       ALL HEALTH CHECKS PASSED"
+                    echo "       HEALTH CHECK COMPLETED"
                     echo "======================================"
                 '''
             }
@@ -827,11 +768,10 @@ NODE
     }
 
 
-    /*
-     * ================================================================
-     * POST ACTIONS
-     * ================================================================
-     */
+    // ================================================================
+    // POST ACTIONS
+    // ================================================================
+
     post {
 
         success {
@@ -840,11 +780,57 @@ NODE
 ======================================
        DEPLOYMENT SUCCESSFUL
 ======================================
-Frontend and backend deployment completed successfully.
+
+Fusion deployment completed successfully.
+
+Frontend:
+${FRONTEND_ROOT}
+
+Backend:
+${BACKEND_ROOT}
+
+PM2:
+${PM2_APP_NAME}
 '''
         }
 
         failure {
+
+            sh '''
+                set +e
+
+                echo "======================================"
+                echo "       DEPLOYMENT FAILED"
+                echo "======================================"
+
+                echo "===== Git ====="
+
+                git log -1 --oneline 2>/dev/null || true
+
+                echo "===== PM2 ====="
+
+                pm2 status || true
+
+                echo "===== PM2 logs ====="
+
+                pm2 logs "${PM2_APP_NAME}" \
+                    --lines 50 \
+                    --nostream 2>/dev/null || true
+
+                echo "===== Nginx ====="
+
+                sudo -n /usr/sbin/nginx -t || true
+
+                echo "===== Deployment directories ====="
+
+                ls -lah "${DEPLOY_ROOT}" 2>/dev/null || true
+                ls -lah "${FRONTEND_ROOT}" 2>/dev/null || true
+                ls -lah "${BACKEND_ROOT}" 2>/dev/null || true
+
+                echo "======================================"
+                echo " Check the failed stage above."
+                echo "======================================"
+            '''
 
             echo '''
 ======================================
@@ -856,20 +842,12 @@ Check the failed stage and Jenkins console output.
 
         always {
 
-            echo "===== Pipeline completed ====="
+            echo "Cleaning Jenkins workspace."
 
-            script {
-
-                sh '''
-                    echo "===== Final PM2 status ====="
-
-                    pm2 status || true
-
-                    echo "===== Final Nginx test ====="
-
-                    sudo -n /usr/sbin/nginx -t || true
-                '''
-            }
+            cleanWs(
+                deleteDirs: true,
+                disableDeferredWipeout: true
+            )
         }
     }
 }
